@@ -3,7 +3,6 @@
 layout(location = 0) in vec2 v_pos;
 layout(location = 1) in vec2 v_texUV;
 
-uniform mat4 u_tex;
 out vec2 texUV;
 
 void main()

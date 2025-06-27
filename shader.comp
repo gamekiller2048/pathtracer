@@ -2,6 +2,7 @@
 
 layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(rgba32f, binding = 0) uniform image2D u_imgOutput;
+layout(rgba32f, binding = 1) uniform image2D u_imgBrightness;
 
 uniform vec2 u_resolution;
 uniform vec3 u_cameraPos;
@@ -57,22 +58,22 @@ struct Hittable
 };
 
 PBRMaterial materials[] = {
-	PBRMaterial(vec3(1.0f), 1.0f, vec3(0.0f), 0.0f, 0.0f, 0.0f),
-	PBRMaterial(vec3(1.0f, 0.0f, 0.0f), 1.0f, vec3(0.0f), 0.0f, 0.0f, 0.0f),
+	PBRMaterial(vec3(1.0f), 0.05f, vec3(0.0f), 1.0f, 0.0f, 0.0f),
+	PBRMaterial(vec3(1.0f, 0.0f, 0.0f), 0.01f, vec3(0.0f), 0.1f, 0.0f, 0.0f),
 	PBRMaterial(vec3(0.0f, 1.0f, 0.0f), 0.0001f, vec3(0.0f), 1.0f, 0.0f, 0.0f),
 	PBRMaterial(vec3(1.0f), 1.0f, vec3(0.0f), 0.0f, 1.0f, 1.5f),
-	PBRMaterial(vec3(1.0f), 1.0f, vec3(1.0f, 0.0f, 0.0f), 0.0f, 0.0f, 0.0f)
+	PBRMaterial(vec3(1.0f), 1.0f, vec3(2.0f), 0.0f, 0.0f, 0.0f)
 };
 
 Sphere spheres[] = {
 	Sphere(vec3(0.7f, 0.0f, 0.0f), 0.3f),
 	Sphere(vec3(0.0f, 0.0f, 0.0f), 0.3f),
 	Sphere(vec3(-0.7f, 0.0f, 0.0f), 0.3f),
-	Sphere(vec3(0.0f, 1.0f, 0.0f), 0.1f)
+	Sphere(vec3(0.0f, 2.0f, 0.0f), 0.5f)
 };
 
 Plane planes[] = {
-	Plane(vec3(0.0f, 1.0f, 0.0f), vec3(0.0f, -0.5f, 0.0f))
+	Plane(vec3(0.0f, 0.3f, 0.0f), vec3(0.0f, -0.5f, 0.0f))
 };
 
 Triangle triangles[] = {
@@ -88,6 +89,13 @@ Hittable objects[] = {
 	Hittable(SPHERE, 3, 4),
 	Hittable(TRIANGLE, 0, 1)
 };
+
+const int NUM_LIGHTS = 1;
+uint lightIndexes[] = {4};
+
+float rand(float x) {
+    return fract(sin(x + u_seed) * 43758.5453123);
+}
 
 // TODO: bug for some reason biased on section of sphere
 float rand(vec2 uv) {
@@ -180,7 +188,7 @@ float hitTriangle(in Triangle triangle, in Ray ray)
 {
 	vec3 edge1 = triangle.v1 - triangle.v0;
 	vec3 edge2 = triangle.v2 - triangle.v0;
-	return -1.0f; // TODO: FINISH
+	return -1.0f;
 }
 
 vec3 hitTriangleNormal(in Triangle triangle)
@@ -235,6 +243,36 @@ vec3 sampleGGX(vec2 uv, vec3 normal, float roughness) {
 	return normalize(H_tangent.x * tangent + H_tangent.y * bitangent + H_tangent.z * normal);
 }
 
+
+vec3 sampleSphereSurface(vec2 uv, inout Sphere sphere)
+{
+	// around vertical axis [0, 2pi]
+	float theta = 2.0 * PI * rand(uv);
+	// angle from the top [0, pi], is weighted by cos for uniform dist
+	float phi = acos(1.0 - 2.0 * rand(0.03));
+
+    return sphere.origin + sphere.radius * vec3(
+		sin(phi) * cos(theta),
+		sin(phi) * sin(theta),
+		cos(phi)
+	);
+}
+
+bool isOccluded(in Ray shadowRay, float maxDist)
+{
+	for(int i=0; i < NUM_OBJECTS; i++) {
+		Hittable object = objects[i];
+
+		float hitDist;
+		if(object.type == SPHERE)
+			hitDist = hitSphere(spheres[object.index], shadowRay);
+
+		if(hitDist > 0.0f || hitDist < maxDist)
+			return true;
+	}
+
+	return false;
+}
 
 vec3 castRay(vec2 uv, Ray ray, uint numBounces)
 {
@@ -332,6 +370,7 @@ vec3 castRay(vec2 uv, Ray ray, uint numBounces)
 			ray.dir = randHemisphereCosWeighted(uv + b, normal);
 			halfWay = normalize(viewDir + ray.dir);
 		}
+
 		
 		float NdotV = max(dot(normal, viewDir), 0.0f);
 		float VdotH = max(dot(viewDir, halfWay), 0.0f);
@@ -350,12 +389,56 @@ vec3 castRay(vec2 uv, Ray ray, uint numBounces)
 		vec3 diffuseBrdf = k_d * material.albedo / PI;
 		float diffusePdf = cosTheta / PI;
 
-		// multi importance sampling using balance heurisitc (weighted sum of prob of sampling from pdf)
-		float mis = specularProb * specularPdf + (1.0f - specularProb) * diffusePdf;
+		float mixPdf = specularProb * specularPdf + (1.0f - specularProb) * diffusePdf;
 		vec3 BRDF = specularBRDF + diffuseBrdf;
 
-		throughput *= BRDF * cosTheta / max(mis, 0.0001f);
-		finalColor += material.emission * throughput;
+		//  * (NUM_LIGHTS + 1) to fix average because we are now sampling 1 + NUM_LIGHTS rays per pixel
+		throughput *= BRDF * cosTheta / max(mixPdf * (NUM_LIGHTS + 1), 0.0001f);
+
+		// *******************TESTING NEE*********************
+		vec3 direct = vec3(0);
+		for(int i=0; i < NUM_LIGHTS; i++) {
+			Hittable object = objects[lightIndexes[i]];
+			PBRMaterial m = materials[object.matIndex];
+
+			vec3 lightPos;
+			vec3 lightNormal;
+			float lightPdf;
+			if(object.type == SPHERE) {
+				lightPos = sampleSphereSurface(uv + b, spheres[object.index]);
+				lightPdf = 1.0f / (4 * PI * pow(spheres[object.index].radius, 2));
+				lightNormal = normalize(lightPos - spheres[object.index].origin);
+			}
+
+			vec3 lightDir = lightPos - hitPos;
+			float dist = length(lightDir);
+			lightDir = normalize(lightDir);
+
+			Ray shadowRay = Ray(ray.origin, lightDir);
+
+			if(true) { //(!isOccluded(shadowRay, dist - 0.001f)) {
+				halfWay = normalize(viewDir + lightDir);
+				float NdotV = max(dot(normal, viewDir), 0.0f);
+				float VdotH = max(dot(viewDir, halfWay), 0.0f);
+				float NdotH = max(dot(normal, halfWay), 0.0f);
+				float cosTheta = max(dot(normal, lightDir), 0.0f);
+		
+				vec3 k_s = Fresnel_Schlick(VdotH, F0);
+				vec3 k_d = (vec3(1.0f) - k_s) * (1.0f - material.metalness);
+
+				float D = D_GGX(NdotH, material.roughness);
+				float G = G_Smith(NdotV, cosTheta, material.roughness);
+
+				vec3 specularBRDF = (D * k_s * G) / max(4.0f * NdotV * cosTheta, 0.0001f);
+				vec3 diffuseBrdf = k_d * material.albedo / PI;
+
+				float pdfSolidAngle = lightPdf * pow(dist, 2) / max(dot(lightNormal, -lightDir), 0.0);
+				direct += m.emission * BRDF * cosTheta / max(pdfSolidAngle * (NUM_LIGHTS + 1), 0.00001f);
+			}
+		}
+		//********************************
+
+		finalColor += (material.emission + direct) * throughput;
 	}
 
 	return finalColor;
@@ -375,4 +458,10 @@ void main()
 	vec4 avrg = ((u_frameCount - 1) * imageLoad(u_imgOutput, ivec2(gl_GlobalInvocationID.xy)) + vec4(finalColor, 1.0f)) / u_frameCount;
 	
 	imageStore(u_imgOutput, ivec2(gl_GlobalInvocationID.xy), avrg);
+
+	float brightness = dot(avrg.rgb, vec3(0.2126, 0.7152, 0.0722));
+    if(brightness > 1.0)
+        imageStore(u_imgBrightness, ivec2(gl_GlobalInvocationID.xy), avrg);
+    else
+        imageStore(u_imgBrightness, ivec2(gl_GlobalInvocationID.xy), vec4(0.0f, 0.0f, 0.0f, 1.0f));
 }
